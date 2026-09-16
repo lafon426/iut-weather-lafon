@@ -1,0 +1,42 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+tasks:
+  local:build:dev:
+    desc: Build dev image locally
+    aliases:
+      - build
+    cmds:
+      - docker buildx bake -f bake.hcl local
+
+  published:compose:up:
+    desc: Create the Compose stack with the published image
+    aliases:
+      - up-pub
+    cmds:
+      - rm -rf debug-published
+      - cp -R local debug-published
+      - docker compose -f debug-published/compose.yaml down
+      - docker compose -f debug-published/compose.yaml up --remove-orphans -d
+
+  local:compose:up:
+    desc: Create the Compose stack with the local image
+    aliases:
+      - up
+    deps:
+      - local:build:dev
+    env:
+      IMAGE: iut-student-workspace:latest
+    cmds:
+      - rm -rf debug
+      - cp -R local debug
+      - docker compose -f debug/compose.yaml down
+      - docker compose -f debug/compose.yaml up --remove-orphans -d
+
+  local:terminal:
+    desc: Open a terminal into the local Compose stack's application container
+    aliases:
+      - term
+    cmds:
+      - docker exec -it weather-application /usr/bin/fish

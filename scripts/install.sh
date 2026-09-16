@@ -1,0 +1,116 @@
+#!/bin/sh
+set -eu
+
+bootstrap_dir="$(mktemp -d /tmp/laravel.XXXXXX)"
+
+trap 'rm -rf "$bootstrap_dir"' EXIT INT TERM
+
+# Remove FrankenPHP generate file
+rm -rf /app/public
+
+# Install Laravel installer
+composer global require laravel/installer
+
+# Create the project in /tmp
+cd "$bootstrap_dir"
+laravel new application --bun --no-boost --database=pgsql
+
+# Copy fresh app into /app
+cp -a "$bootstrap_dir/application"/. /app/
+cd /app
+
+# Configure PostgreSQL, Redis and Mailpit in both environment files.
+for env_file in .env .env.example; do
+    env_tmp="$(mktemp)"
+
+    awk '
+        BEGIN {
+            count = split("DB_CONNECTION DB_HOST DB_PORT DB_DATABASE DB_USERNAME DB_PASSWORD REDIS_CLIENT REDIS_HOST REDIS_PASSWORD REDIS_PORT CACHE_STORE QUEUE_CONNECTION SESSION_DRIVER MAIL_MAILER MAIL_SCHEME MAIL_HOST MAIL_PORT MAIL_USERNAME MAIL_PASSWORD", keys, " ")
+            values["DB_CONNECTION"] = "pgsql"
+            values["DB_HOST"] = "postgresql"
+            values["DB_PORT"] = "5432"
+            values["DB_DATABASE"] = "iutweather"
+            values["DB_USERNAME"] = "iutweather"
+            values["DB_PASSWORD"] = "iutweather"
+            values["REDIS_CLIENT"] = "phpredis"
+            values["REDIS_HOST"] = "redis"
+            values["REDIS_PASSWORD"] = "null"
+            values["REDIS_PORT"] = "6379"
+            values["CACHE_STORE"] = "redis"
+            values["QUEUE_CONNECTION"] = "redis"
+            values["SESSION_DRIVER"] = "redis"
+            values["MAIL_MAILER"] = "smtp"
+            values["MAIL_SCHEME"] = "smtp"
+            values["MAIL_HOST"] = "mailpit"
+            values["MAIL_PORT"] = "1025"
+            values["MAIL_USERNAME"] = "null"
+            values["MAIL_PASSWORD"] = "null"
+        }
+        {
+            for (i = 1; i <= count; i++) {
+                key = keys[i]
+                if ($0 ~ "^[[:space:]]*#?[[:space:]]*" key "[[:space:]]*=") {
+                    if (!seen[key]++) print key "=" values[key]
+                    next
+                }
+            }
+            print
+        }
+        END {
+            for (i = 1; i <= count; i++) {
+                key = keys[i]
+                if (!seen[key]) print key "=" values[key]
+            }
+        }
+    ' "$env_file" > "$env_tmp"
+
+    cat "$env_tmp" > "$env_file"
+    rm -f "$env_tmp"
+done
+
+php artisan config:clear
+php artisan migrate --force
+
+# Update Vite config for Docker environment
+vite_config=""
+if [ -f vite.config.ts ]; then
+    vite_config=vite.config.ts
+elif [ -f vite.config.js ]; then
+    vite_config=vite.config.js
+fi
+
+if [ -n "$vite_config" ] && ! grep -q "host: '0.0.0.0'" "$vite_config"; then
+    vite_config_tmp="$(mktemp)"
+
+    if grep -q "server:[[:space:]]*{" "$vite_config"; then
+        awk '
+            !inserted && /^[[:space:]]*server:[[:space:]]*{/ {
+                print
+                print "        host: '\''0.0.0.0'\'',"
+                print "        hmr: {"
+                print "            host: '\''127.0.0.1'\''"
+                print "        },"
+                print "        cors: true,"
+                inserted = 1
+                next
+            }
+            { print }
+        ' "$vite_config" > "$vite_config_tmp"
+    else
+        awk '
+            { print }
+            !inserted && /export default defineConfig\(\{/ {
+                print "    server: {"
+                print "        host: '\''0.0.0.0'\'',"
+                print "        hmr: {"
+                print "            host: '\''127.0.0.1'\''"
+                print "        },"
+                print "        cors: true,"
+                print "    },"
+                inserted = 1
+            }
+        ' "$vite_config" > "$vite_config_tmp"
+    fi
+
+    mv "$vite_config_tmp" "$vite_config"
+fi
